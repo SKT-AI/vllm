@@ -1554,6 +1554,24 @@ class AXK2MLAAttention(nn.Module):
                 "attention_output_gate requires q_lora_rank (fused gate rides "
                 "inside q_b_proj)"
             )
+            # A checkpoint that stores the gate separately cannot be served
+            # here: only the fused layout is implemented, and it is not merely
+            # a packing choice. The fused output is per-head interleaved
+            # [q | gate] with a head stride of qk_head_dim + v_head_dim, which
+            # is not a multiple of the 128-wide fp8 scale block, so the q/gate
+            # boundary straddles scale blocks and the weight cannot be split
+            # losslessly. Reject it up front -- otherwise the only symptom is a
+            # bare shape mismatch on q_b_proj (the fused projection takes
+            # 2 * q_lora_rank inputs) once the weights start loading.
+            if not getattr(config, "attn_gate_fused", True):
+                raise ValueError(
+                    "This checkpoint sets attn_gate_fused=False, i.e. the "
+                    "attention output gate is stored as a separate projection. "
+                    "Only the fused layout is supported: q_b_proj must already "
+                    "absorb the gate (doubled input, per-head interleaved "
+                    "output). Re-export the checkpoint with the offline merge "
+                    "step applied."
+                )
 
         # AXK2 always uses q-lora MLA; the q-lora-less (q_proj) path is removed.
         assert self.q_lora_rank is not None, (
