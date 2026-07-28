@@ -77,6 +77,7 @@ _TEXT_GENERATION_MODELS = {
     "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
+    "AXK2ForCausalLM": ("axk2", "AXK2ForCausalLM"),
     # baichuan-7b, upper case 'C' in the class name
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
     # baichuan-13b, lower case 'c' in the class name
