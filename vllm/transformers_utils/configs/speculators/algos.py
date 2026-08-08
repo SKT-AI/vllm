@@ -104,3 +104,43 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
         "mask_token_id": config_dict["mask_token_id"],
         "target_layer_ids": [i - 1 for i in aux_layer_ids],
     }
+
+
+@register_speculator("dspark")
+def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
+    """
+    Apply DSpark specific configuration transformations to the `dict` used to
+    construct the Transformers PreTrainedConfig.
+
+    DSpark is DFlash plus a first-order Markov logit-bias head (and a
+    training-time confidence head that is unused at inference). It shares every
+    DFlash field, so we reuse ``update_dflash`` and then:
+    - override ``architectures`` to load the DSpark model class (which adds the
+      Markov head weights on top of the DFlash backbone), and
+    - surface the Markov head hyper-parameters (``markov_rank``,
+      ``markov_head_type``) so the DSpark model can build the head.
+
+    DSpark specific fields:
+    - markov_rank: low-rank dim of the Markov bias factorization B = W1 @ W2.
+    - markov_head_type: Markov head variant. Only "vanilla" (first-order,
+      previous-token-only) is supported at inference.
+    """
+    update_dflash(config_dict=config_dict, pre_trained_config=pre_trained_config)
+    pre_trained_config["architectures"] = ["DSparkDraftModel"]
+
+    markov_rank = config_dict.get("markov_rank", 256)
+    markov_head_type = config_dict.get("markov_head_type", "vanilla")
+    pre_trained_config["markov_rank"] = markov_rank
+    pre_trained_config["markov_head_type"] = markov_head_type
+    # Also mirror into dflash_config so anything reading the drafter sub-config
+    # (see DFlashQwen3Model) can find the Markov settings.
+    pre_trained_config["dflash_config"]["markov_rank"] = markov_rank
+    pre_trained_config["dflash_config"]["markov_head_type"] = markov_head_type
+
+    # sample_from_anchor controls the block layout the draft was trained for.
+    # DSpark defaults to True (the anchor slot predicts the first speculative
+    # token). The DSparkProposer reads this to realign the sampled query slots
+    # against the container's DFlash (sample_from_anchor=False) convention.
+    pre_trained_config["dflash_config"]["sample_from_anchor"] = config_dict.get(
+        "sample_from_anchor", True
+    )

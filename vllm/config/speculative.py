@@ -52,7 +52,7 @@ MTPModelTypes = Literal[
     "gemma4_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
-DFlashModelTypes = Literal["dflash"]
+DFlashModelTypes = Literal["dflash", "dspark"]
 EagleModelTypes = Literal[
     "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
 ]
@@ -280,6 +280,7 @@ class SpeculativeConfig:
             "eagle3",
             "extract_hidden_states",
             "dflash",
+            "dspark",
         )
         factors.append(uses_aux_hidden_states)
 
@@ -694,7 +695,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash"):
+                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -704,6 +705,8 @@ class SpeculativeConfig:
                     self.method = "eagle"
                 elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
+                elif "dspark" in self.draft_model_config.model.lower():
+                    self.method = "dspark"
                 elif "dflash" in self.draft_model_config.model.lower():
                     self.method = "dflash"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
@@ -732,7 +735,7 @@ class SpeculativeConfig:
                     )
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3", "dflash"):
+                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
                     from vllm.transformers_utils.configs.speculators import (
                         SpeculatorsConfig,
@@ -752,7 +755,7 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config = eagle_config
                         self.update_arch_()
 
-                if self.method == "dflash":
+                if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
 
                 if self.num_speculative_tokens is not None and hasattr(
@@ -1068,10 +1071,13 @@ class SpeculativeConfig:
         )
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp", "dflash")
+        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
     def use_dflash(self) -> bool:
-        return self.method == "dflash"
+        # DSpark shares the whole DFlash inference path (parallel drafting,
+        # aux hidden states, cross-attention KV precompute); the proposer class
+        # is selected separately in gpu_model_runner.
+        return self.method in ("dflash", "dspark")
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
