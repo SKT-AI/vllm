@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cfloat>
+#include <cstdlib>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -452,7 +453,8 @@ __global__ void concat_and_cache_ds_mla_kernel(
     const int kv_lora_rank,                    //
     const int pe_dim,                          //
     const int block_size,                      //
-    const float* scale                         //
+    const float* scale,                        //
+    const bool use_ue8m0  // round the tile scale up to a power of two
 ) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
@@ -516,6 +518,23 @@ __global__ void concat_and_cache_ds_mla_kernel(
 
   // Compute the scale for the tile
   float tile_scale = fmaxf(max_abs / kFp8ScaleDivisor, FLT_MIN);
+
+  // On the SM100 family the reader does not read this scale back as fp32.
+  // FlashMLA's sparse fp8 decode kernel converts it to E8M0 with
+  // round-toward-zero (csrc/sm100/decode/head64/kernel.cuh:708-709), i.e.
+  // floor(log2(s)), so storing an arbitrary fp32 dequantizes every
+  // (token, 128-tile) with a scale up to 2x too small -- a mean relative
+  // error of 0.279, four times e4m3's own quantization error. Rounding up to
+  // a power of two here makes the reader's floor() the identity and the two
+  // sides agree exactly. Ceil, not floor: rounding down raises the quantized
+  // magnitudes and overflows e4m3's 448 limit. The SM90 reader does read the
+  // fp32 (csrc/sm90/decode/sparse_fp8/splitkv_mla.cuh:550) and only pays the
+  // ~0.5 bit of mantissa this costs, so the caller keys it off the arch.
+  // indexer_k_quant_and_cache_kernel below already does this for the indexer
+  // cache under its own `use_ue8m0` flag.
+  if (use_ue8m0) {
+    tile_scale = exp2f(ceilf(log2f(tile_scale)));
+  }
 
   // The first lane of each half-warp writes the scale to kv_cache
   if ((lane_idx == 0) || (lane_idx == 16)) {
@@ -833,7 +852,45 @@ void reshape_and_cache_flash(
           reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                    \
           slot_mapping.const_data_ptr<int64_t>(), block_stride, entry_stride, \
           kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,         \
-          reinterpret_cast<const float*>(scale.data_ptr()));
+          reinterpret_cast<const float*>(scale.data_ptr()), use_ue8m0);
+
+namespace {
+
+// Whether concat_and_cache_ds_mla_kernel should round its per-tile scale up to
+// a power of two. Required wherever the reader truncates the scale to E8M0,
+// which is the SM100 family (B200 sm_100, B300 sm_103 -- FlashMLA's
+// Arch::is_sm100f() is `major == 10`); SM90 reads the fp32 as written and does
+// not need it. VLLM_DS_MLA_UE8M0_SCALE=0/1 forces it off/on, which is what
+// makes an A/B of this fix possible without rebuilding the image.
+//
+// The compute capability comes from the CUDA runtime rather than
+// at::cuda::getCurrentDeviceProperties: this translation unit is on the stable
+// ABI and does not link ATen.
+bool ds_mla_use_ue8m0_scale() {
+  static const bool value = [] {
+    const char* env = std::getenv("VLLM_DS_MLA_UE8M0_SCALE");
+    if (env != nullptr && env[0] != '\0') {
+      return env[0] != '0';
+    }
+#ifdef USE_ROCM
+    return false;
+#else
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess) {
+      return false;
+    }
+    int major = 0;
+    if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor,
+                               device) != cudaSuccess) {
+      return false;
+    }
+    return major == 10;
+#endif
+  }();
+  return value;
+}
+
+}  // namespace
 
 void concat_and_cache_mla(
     torch::stable::Tensor& kv_c,      // [num_tokens, kv_lora_rank]
@@ -888,6 +945,7 @@ void concat_and_cache_mla(
     // The RoPE part (last 64 elements) is handled by another 1 warp (32
     // threads). So in total, we use 3 warps (96 threads) per block.
     dim3 block(96);
+    const bool use_ue8m0 = ds_mla_use_ue8m0_scale();
     DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype,
                                CALL_CONCAT_AND_CACHE_DS_MLA);
   } else {
