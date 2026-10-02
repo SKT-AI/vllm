@@ -30,18 +30,23 @@ except ImportError as e:
 
 
 try:
-    import os
-
-    _cute_interface_path = os.path.join(
-        os.path.dirname(__file__), "cute", "interface.py"
-    )
-    if not os.path.exists(_cute_interface_path):
-        raise ImportError("vllm.vllm_flash_attn.cute.interface not found")
+    # Actually import it, the way FA2/FA3 are probed above. Checking only that
+    # cute/interface.py exists on disk marks FA4 available whenever the files
+    # are shipped, even if its dependency chain cannot load -- and FA4 is the
+    # DEFAULT on Blackwell, so the failure surfaces as a hard error at the
+    # first prefill rather than a fallback to FA2. Seen with quack-kernels
+    # 0.5.0 against nvidia-cutlass-dsl >= 4.6, which dropped cute.core.ThrMma:
+    # quack still satisfies its own `>= 4.5.2` bound, imports fine at the file
+    # level, and raises AttributeError on use.
+    #
+    # Catch Exception, not just ImportError: a version-skewed dependency raises
+    # AttributeError, TypeError or similar from inside its own module body.
+    from .cute import interface as _fa4_interface  # noqa: F401
 
     FA4_UNAVAILABLE_REASON = None
     FA4_AVAILABLE = True
-except (ImportError, ModuleNotFoundError) as e:
-    FA4_UNAVAILABLE_REASON = str(e)
+except Exception as e:  # noqa: BLE001
+    FA4_UNAVAILABLE_REASON = f"{type(e).__name__}: {e}"
     FA4_AVAILABLE = False
 
 # isort: on
