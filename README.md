@@ -1,4 +1,39 @@
 <!-- markdownlint-disable MD001 MD041 -->
+
+> [!WARNING]
+> **A.X fork — build this tree's CUDA kernels; a Python-only install silently drops fixes.**
+>
+> This branch changes compiled code, not only Python. Notably `csrc/libtorch_stable/cache_kernels.cu`
+> fixes the `fp8_ds_mla` KV-cache writer on SM100 (B200 / B300): FlashMLA's sparse fp8 decode
+> kernel reads each tile scale back as E8M0 rounded toward zero, so the writer stores the scale as a
+> power of two. Without it, `--kv-cache-dtype fp8` on `FLASHMLA_SPARSE` has ~67% attention-output
+> error instead of ~6%, which shows up as wrong digits, phone numbers and tool-call arguments.
+>
+> | Install path | Kernel fixes included? |
+> |---|---|
+> | `pip install -e .` (full source build) | ✅ yes |
+> | `VLLM_USE_PRECOMPILED=1 pip install -e .` | ❌ no — fetches upstream binaries |
+> | `pip install vllm==0.23.0` + copy this branch's `vllm/*.py` over it | ❌ no — the `.so` files are stock |
+> | `build_ext` rebuild that swaps only `_C` / `_moe_C` | ❌ no — the writer lives in **`_C_stable_libtorch`** |
+>
+> When overlaying Python onto the stock wheel (common in Dockerfiles), rebuild the extensions from
+> this tree and copy **all** of them:
+>
+> ```bash
+> TORCH_CUDA_ARCH_LIST="10.0a" python setup.py build_ext --inplace   # 10.3a for B300
+> for f in _C _C_stable_libtorch _moe_C cumem_allocator; do cp -f vllm/$f.abi3.so "$SITE_PKG/$f.abi3.so"; done
+> ```
+>
+> Then check the **installed binary**, not the source tree (0 means stock kernels):
+>
+> ```bash
+> strings "$(python -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')/_C_stable_libtorch.abi3.so" | grep -c VLLM_DS_MLA_UE8M0_SCALE
+> ```
+>
+> Only `fp8_ds_mla` (`--kv-cache-dtype fp8` with `FLASHMLA_SPARSE`) on compute capability 10.x is
+> affected; the default bf16 KV cache is not. `VLLM_DS_MLA_UE8M0_SCALE=0/1` forces the fix off/on
+> (default: on for SM100). It is read by the compiled kernel, so it does nothing on stock binaries.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-dark.png">
